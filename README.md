@@ -100,6 +100,52 @@ Use `--json` for CI integration. Exit code 1 on any FAIL.
 lerobot-doctor /path/to/dataset --json | jq '.overall_severity'
 ```
 
+## Fix (auto-repair)
+
+```bash
+lerobot-doctor fix /path/to/dataset              # fix all issues (creates backup)
+lerobot-doctor fix /path/to/dataset --dry-run    # preview fixes
+lerobot-doctor fix /path/to/dataset --fixes timestamps,metadata
+```
+
+Fixes: broken indices, timestamp drift, NaN values, metadata mismatches.
+
+## Trim (remove idle frames)
+
+```bash
+lerobot-doctor trim /path/to/dataset             # remove start/end idle frames
+lerobot-doctor trim /path/to/dataset --dry-run   # preview
+```
+
+Fixes the "robot does nothing at inference" problem caused by static training data.
+
+## Score (find bad episodes)
+
+```bash
+lerobot-doctor score /path/to/dataset            # rank episodes by quality
+lerobot-doctor score /path/to/dataset --json     # JSON for automation
+```
+
+Scores: smoothness, coverage, consistency, length. Recommends which episodes to drop.
+
+## Gate (pre-training check)
+
+```bash
+lerobot-doctor gate /path/to/dataset --policy act        # ACT compatibility
+lerobot-doctor gate /path/to/dataset --policy diffusion  # Diffusion Policy
+lerobot-doctor gate /path/to/dataset --policy smolvla    # SmolVLA
+lerobot-doctor gate /path/to/dataset --policy pi0        # Pi0
+```
+
+Exit code 1 if dataset is incompatible. Catches: wrong dims, short episodes, NaN normalization.
+
+## Merge Check
+
+```bash
+lerobot-doctor merge-check ./dataset1 ./dataset2         # pre-merge compatibility
+lerobot-doctor merge-check ./merged_dataset --post-merge # post-merge validation
+```
+
 ## Development
 
 ```bash
