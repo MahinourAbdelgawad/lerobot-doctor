@@ -6,6 +6,8 @@ Catches issues that waste debugging time: corrupted timestamps, dropped frames, 
 
 Works on local datasets and HuggingFace Hub datasets. No dependency on the lerobot package.
 
+**Live now** on the [LeRobot Dataset Visualizer](https://huggingface.co/spaces/lerobot/visualize_dataset) as the "Doctor" tab, and as a standalone [HF Space](https://huggingface.co/spaces/jashshah999/lerobot-doctor).
+
 ## Install
 
 ```bash
@@ -35,14 +37,23 @@ lerobot-doctor /path/to/dataset --checks metadata,temporal,actions
 # JSON output (for CI/CD integration)
 lerobot-doctor /path/to/dataset --json
 
-# Limit episodes checked (for large datasets)
-lerobot-doctor /path/to/dataset --max-episodes 10
+# Markdown report (paste into PRs or dataset cards)
+lerobot-doctor /path/to/dataset --markdown report.md
+
+# Limit episodes checked (recommended for huge HF datasets like lerobot/droid_1.0.1)
+lerobot-doctor lerobot/droid_1.0.1 --max-episodes 10
 
 # Verbose (show PASS details)
 lerobot-doctor /path/to/dataset -v
+
+# CI mode: JSON output, exits 1 on failures
+lerobot-doctor /path/to/dataset --ci
+
+# CI mode: exits 1 on warnings too
+lerobot-doctor /path/to/dataset --ci --fail-on=warn
 ```
 
-## Checks (10 total)
+## Checks (11 total)
 
 | Check | What it catches |
 |-------|----------------|
@@ -56,6 +67,7 @@ lerobot-doctor /path/to/dataset -v
 | **training** | Policy compatibility (ACT/Diffusion/VLA), normalization readiness (zero-std dims), action space sanity, delta_timestamps compatibility |
 | **anomalies** | Stuck actuators (>80% static), near-duplicate episodes, distribution shift across dataset, broken sensors (constant observations) |
 | **portability** | Absolute paths, symlinks, large files, HF Hub compatibility, non-standard files |
+| **per_episode** | Per-episode drilldown: flags specific bad episodes with reasons (short, frozen, NaN, timestamp gaps, action jumps) |
 
 ## Exit codes
 
@@ -84,21 +96,60 @@ Episodes: 206 | Frames: 25,650 | FPS: 10
 [PASS] Training Readiness
 [WARN] Anomaly Detection
   - next.success: ALL 1 dimensions constant across ALL episodes
+[WARN] Per-Episode Drilldown
+  - Episode 2: 1 sudden action jumps
+  - Episode 3: 2 sudden action jumps
 
-Summary: 5 PASS | 5 WARN
+Summary: 5 PASS | 6 WARN
 
 Suggested fixes:
   Check sensor connections -- constant readings indicate hardware issues
   Filter episodes shorter than your policy's chunk_size before training
 ```
 
+## CI / GitHub Actions
+
+Use `--ci` for pipeline integration. Outputs JSON to stdout, one-line summary to stderr.
+
+```bash
+# Fail pipeline on any FAIL
+lerobot-doctor lerobot/pusht --ci
+
+# Fail pipeline on WARNs too (stricter)
+lerobot-doctor lerobot/pusht --ci --fail-on=warn
+```
+
+Example GitHub Actions step:
+
+```yaml
+- name: Dataset quality gate
+  run: lerobot-doctor my-org/my-dataset --ci --fail-on=warn
+```
+
 ## JSON output
 
-Use `--json` for CI integration. Exit code 1 on any FAIL.
+Use `--json` for JSON output without CI exit-code behavior.
 
 ```bash
 lerobot-doctor /path/to/dataset --json | jq '.overall_severity'
 ```
+
+## Huge datasets
+
+For very large datasets (e.g. `lerobot/droid_1.0.1` at ~28M frames across 156 data parquets + videos), always pass `--max-episodes N` with a small N (10-100). Running without it attempts a full download, which:
+
+- On the hosted [HF Space](https://huggingface.co/spaces/jashshah999/lerobot-doctor): **will fail** -- the Space has ~50GB ephemeral disk. The Space also blocks "all episodes" on datasets with >1M frames.
+- Locally: works if you have the bandwidth and disk, but is slow.
+
+When `--max-episodes` is set on a HF dataset, lerobot-doctor:
+
+1. Fetches small meta files (info.json, tasks.parquet, stats.json).
+2. Downloads episodes meta parquets one at a time until the first N episodes are covered.
+3. Resolves `data/chunk_index` + `data/file_index` to pull only the data parquets that contain those N episodes.
+
+Checks that rely on the full dataset (e.g. `total_episodes` count in metadata) are automatically skipped in partial mode instead of flagging false-positive failures.
+
+**Future work:** sampled full-dataset scans (random subset across chunks), video sampling without full download.
 
 ## Fix (auto-repair)
 

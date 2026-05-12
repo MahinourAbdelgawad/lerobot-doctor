@@ -18,13 +18,17 @@ def main(argv: list[str] | None = None):
 
     subparsers = parser.add_subparsers(dest="command")
 
-    # === CHECK ===
+    # === CHECK (default) ===
     check_p = subparsers.add_parser("check", help="Run diagnostic checks (default)")
     check_p.add_argument("dataset", help="Path to local dataset or HF repo_id")
-    check_p.add_argument("--checks", type=str, default=None)
+    check_p.add_argument("--checks", type=str, default=None,
+                         help="Comma-separated list of checks to run (default: all)")
     check_p.add_argument("--max-episodes", type=int, default=None)
     check_p.add_argument("--json", action="store_true", dest="json_output")
     check_p.add_argument("-v", "--verbose", action="store_true")
+    check_p.add_argument("--ci", action="store_true")
+    check_p.add_argument("--fail-on", choices=["warn", "fail"], default="fail")
+    check_p.add_argument("--markdown", type=str, default=None, metavar="PATH")
 
     # === FIX ===
     fix_p = subparsers.add_parser("fix", help="Auto-fix common dataset issues")
@@ -61,18 +65,17 @@ def main(argv: list[str] | None = None):
     merge_p.add_argument("datasets", nargs="+", help="Paths to datasets")
     merge_p.add_argument("--post-merge", action="store_true")
 
-    # Parse — handle legacy (no subcommand = "check")
+    # Parse -- handle legacy (no subcommand = "check")
     if argv is None:
         argv = sys.argv[1:]
 
-    # If first arg doesn't look like a subcommand, prepend "check"
     known_commands = {"check", "fix", "trim", "score", "gate", "merge-check", "--version", "-h", "--help"}
     if argv and argv[0] not in known_commands and not argv[0].startswith("-"):
         argv = ["check"] + argv
 
     args = parser.parse_args(argv)
 
-    if args.command == "check":
+    if args.command == "check" or args.command is None:
         _run_check(args)
     elif args.command == "fix":
         _run_fix(args)
@@ -91,21 +94,38 @@ def main(argv: list[str] | None = None):
 def _run_check(args):
     from lerobot_doctor.dataset_loader import load_dataset
     from lerobot_doctor.runner import run_checks
-    from lerobot_doctor.report import print_report, report_to_json
+    from lerobot_doctor.report import print_report, report_to_json, report_to_markdown
 
     check_names = [c.strip() for c in args.checks.split(",")] if args.checks else None
     try:
-        dataset = load_dataset(args.dataset, max_episodes=getattr(args, 'max_episodes', None))
+        dataset = load_dataset(args.dataset, max_episodes=args.max_episodes)
     except Exception as e:
         print(f"Error loading dataset: {e}", file=sys.stderr)
         sys.exit(1)
 
-    report = run_checks(dataset, checks=check_names, verbose=getattr(args, 'verbose', False))
-    if getattr(args, 'json_output', False):
+    report = run_checks(dataset, checks=check_names, verbose=args.verbose)
+
+    if args.ci:
+        print(report_to_json(report))
+        counts = report.summary_counts
+        summary = f"lerobot-doctor: {counts['PASS']} pass, {counts['WARN']} warn, {counts['FAIL']} fail"
+        print(summary, file=sys.stderr)
+        threshold = args.fail_on.upper()
+        if threshold == "WARN" and report.overall_severity.value in ("WARN", "FAIL"):
+            sys.exit(1)
+        elif threshold == "FAIL" and report.overall_severity.value == "FAIL":
+            sys.exit(1)
+    elif args.json_output:
         print(report_to_json(report))
     else:
-        print_report(report, verbose=getattr(args, 'verbose', False))
-    if report.overall_severity.value == "FAIL":
+        print_report(report, verbose=args.verbose)
+
+    if args.markdown:
+        from pathlib import Path
+        Path(args.markdown).write_text(report_to_markdown(report))
+        print(f"Wrote markdown report to {args.markdown}", file=sys.stderr)
+
+    if not args.ci and report.overall_severity.value == "FAIL":
         sys.exit(1)
 
 
