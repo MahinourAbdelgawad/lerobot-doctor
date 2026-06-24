@@ -12,7 +12,7 @@ from lerobot_doctor import __version__
 def main(argv: list[str] | None = None):
     parser = argparse.ArgumentParser(
         prog="lerobot-doctor",
-        description="Dataset quality diagnostics, repair, and curation for LeRobot v3 datasets",
+        description="Dataset quality diagnostics, repair, and curation for LeRobot v2/v3 datasets",
     )
     parser.add_argument("--version", action="version", version=f"lerobot-doctor {__version__}")
 

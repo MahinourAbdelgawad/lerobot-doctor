@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "lerobot-doctor"
 version = "0.1.0"
-description = "Dataset quality diagnostics for LeRobot v3 datasets"
+description = "Dataset quality diagnostics for LeRobot v2/v3 datasets"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}

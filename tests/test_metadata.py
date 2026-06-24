@@ -91,7 +91,7 @@ def test_missing_tasks_parquet(tmp_path):
     ds = load_local(root)
     result = check_metadata(ds)
     assert result.severity == Severity.FAIL
-    assert any("tasks.parquet" in m.message for m in result.messages)
+    assert any("task metadata" in m.message for m in result.messages)
 
 
 def test_no_data_directory(tmp_path):
@@ -104,7 +104,7 @@ def test_no_data_directory(tmp_path):
     assert any("data/" in m.message for m in result.messages)
 
 
-def test_non_v3_version_warns(tmp_path):
+def test_v2_version_supported(tmp_path):
     root = create_dataset(tmp_path / "dataset")
     info_path = root / "meta" / "info.json"
     info = json.loads(info_path.read_text())
@@ -112,4 +112,16 @@ def test_non_v3_version_warns(tmp_path):
     info_path.write_text(json.dumps(info))
     ds = load_local(root)
     result = check_metadata(ds)
-    assert any(m.severity == Severity.WARN and "v2.0" in m.message for m in result.messages)
+    assert ds.info.format_version == "v2"
+    assert not any(m.severity == Severity.WARN and "expected v3" in m.message for m in result.messages)
+
+
+def test_unsupported_version_warns(tmp_path):
+    root = create_dataset(tmp_path / "dataset")
+    info_path = root / "meta" / "info.json"
+    info = json.loads(info_path.read_text())
+    info["codebase_version"] = "v1.0"
+    info_path.write_text(json.dumps(info))
+    ds = load_local(root)
+    result = check_metadata(ds)
+    assert any(m.severity == Severity.WARN and "v1.0" in m.message for m in result.messages)

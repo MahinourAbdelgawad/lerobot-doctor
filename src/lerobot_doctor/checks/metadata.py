@@ -24,6 +24,14 @@ def check_metadata(dataset: LoadedDataset) -> CheckResult:
     info = dataset.info
     result.pass_("info.json loaded successfully")
 
+    if info.format_version in {"v2", "v3"}:
+        label = info.codebase_version or info.format_version
+        result.pass_(f"Detected LeRobot Dataset {info.format_version} format ({label})")
+    elif info.codebase_version:
+        result.warn(f"Codebase version is {info.codebase_version}; only v2.x and v3.x are explicitly supported")
+    else:
+        result.warn("Could not detect LeRobot dataset format version from info.json or layout")
+
     # Check required fields
     missing = [f for f in REQUIRED_INFO_FIELDS if f not in info.raw]
     if missing:
@@ -32,8 +40,10 @@ def check_metadata(dataset: LoadedDataset) -> CheckResult:
         result.pass_("All required fields present in info.json")
 
     # Check codebase version
-    if info.codebase_version and not info.codebase_version.startswith("v3"):
-        result.warn(f"Codebase version is {info.codebase_version}, expected v3.x")
+    if info.codebase_version and not (
+        info.codebase_version.startswith("v2") or info.codebase_version.startswith("v3")
+    ):
+        result.warn(f"Codebase version is {info.codebase_version}, expected v2.x or v3.x")
 
     # Check fps is positive
     if info.fps is not None and info.fps <= 0:
@@ -45,13 +55,13 @@ def check_metadata(dataset: LoadedDataset) -> CheckResult:
     # Check episode metadata files
     _check_episode_meta(dataset, result)
 
-    # Check tasks.parquet
+    # Check task metadata (v3: tasks.parquet; v2: tasks.jsonl/tasks.json)
     if info.total_tasks and info.total_tasks > 0:
         if dataset.tasks is None:
-            result.fail(f"total_tasks={info.total_tasks} but tasks.parquet not found")
+            result.fail(f"total_tasks={info.total_tasks} but task metadata not found")
         elif len(dataset.tasks) != info.total_tasks:
             result.warn(
-                f"total_tasks={info.total_tasks} but tasks.parquet has {len(dataset.tasks)} rows"
+                f"total_tasks={info.total_tasks} but task metadata has {len(dataset.tasks)} rows"
             )
 
     partial = dataset.max_episodes_applied is not None
@@ -106,11 +116,11 @@ def _check_data_files(dataset: LoadedDataset, result: CheckResult):
 
 def _check_episode_meta(dataset: LoadedDataset, result: CheckResult):
     episodes_dir = dataset.root / "meta" / "episodes"
-    if not episodes_dir.exists():
-        result.warn("meta/episodes/ directory not found")
-        return
-    parquet_files = list(episodes_dir.rglob("*.parquet"))
-    if not parquet_files:
-        result.warn("No parquet files found in meta/episodes/")
-    else:
+    episodes_jsonl = dataset.root / "meta" / "episodes.jsonl"
+    parquet_files = list(episodes_dir.rglob("*.parquet")) if episodes_dir.exists() else []
+    if parquet_files:
         result.pass_(f"Found {len(parquet_files)} episode metadata file(s)")
+    elif episodes_jsonl.exists():
+        result.pass_("Found v2 episode metadata: meta/episodes.jsonl")
+    else:
+        result.warn("Episode metadata not found (expected meta/episodes/*.parquet for v3 or meta/episodes.jsonl for v2)")
