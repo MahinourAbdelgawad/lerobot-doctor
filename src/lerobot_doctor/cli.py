@@ -91,17 +91,27 @@ def main(argv: list[str] | None = None):
         parser.print_help()
 
 
-def _run_check(args):
+def _load_dataset_or_exit(path: str, max_episodes: int | None = None):
+    """Load a local dir, zip archive, or HF repo_id; exit 1 on failure."""
     from lerobot_doctor.dataset_loader import load_dataset
+
+    try:
+        ds = load_dataset(path, max_episodes=max_episodes)
+    except Exception as e:
+        print(f"Error loading dataset: {e}", file=sys.stderr)
+        sys.exit(1)
+    if ds.info is None:
+        print(f"Error loading dataset: {ds.info_error}", file=sys.stderr)
+        sys.exit(1)
+    return ds
+
+
+def _run_check(args):
     from lerobot_doctor.runner import run_checks
     from lerobot_doctor.report import print_report, report_to_json, report_to_markdown
 
     check_names = [c.strip() for c in args.checks.split(",")] if args.checks else None
-    try:
-        dataset = load_dataset(args.dataset, max_episodes=args.max_episodes)
-    except Exception as e:
-        print(f"Error loading dataset: {e}", file=sys.stderr)
-        sys.exit(1)
+    dataset = _load_dataset_or_exit(args.dataset, max_episodes=args.max_episodes)
 
     report = run_checks(dataset, checks=check_names, verbose=args.verbose)
 
@@ -163,10 +173,10 @@ def _run_trim(args):
 
 
 def _run_score(args):
-    from pathlib import Path
     from lerobot_doctor.score import score_episodes
 
-    result = score_episodes(Path(args.dataset), max_episodes=args.max_episodes, drop_threshold=args.drop_threshold)
+    ds = _load_dataset_or_exit(args.dataset, max_episodes=args.max_episodes)
+    result = score_episodes(ds.root, max_episodes=args.max_episodes, drop_threshold=args.drop_threshold)
     if args.json_output:
         print(json_module.dumps({
             "mean_score": result.mean_score,
@@ -184,10 +194,10 @@ def _run_score(args):
 
 
 def _run_gate(args):
-    from pathlib import Path
     from lerobot_doctor.gate import gate_check
 
-    result = gate_check(Path(args.dataset), policy=args.policy, custom_chunk_size=args.chunk_size)
+    ds = _load_dataset_or_exit(args.dataset)
+    result = gate_check(ds.root, policy=args.policy, custom_chunk_size=args.chunk_size)
     if args.json_output:
         print(json_module.dumps({"passed": result.passed, "policy": result.policy,
                                  "blockers": result.blockers, "warnings": result.warnings}, indent=2))
