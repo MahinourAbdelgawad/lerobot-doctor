@@ -8,6 +8,63 @@ from lerobot_doctor.dataset_loader import LoadedDataset
 from lerobot_doctor.runner import CheckResult, Severity
 
 
+def _probe_video(path: Path, count_frames_if_needed: bool = False) -> dict:
+    """Return basic video metadata and whether the first frame decodes.
+
+    PyAV is preferred because it is the package dependency. OpenCV is used as a
+    best-effort fallback in development environments where PyAV is unavailable.
+    """
+    try:
+        import av
+
+        container = av.open(str(path))
+        stream = container.streams.video[0]
+        frame_count = int(stream.frames or 0)
+        if frame_count == 0 and count_frames_if_needed:
+            container.seek(0)
+            frame_count = sum(1 for _ in container.decode(video=0))
+
+        container.seek(0)
+        can_decode = False
+        for _ in container.decode(video=0):
+            can_decode = True
+            break
+
+        info = {
+            "fps": float(stream.average_rate) if stream.average_rate else None,
+            "width": int(stream.width or 0),
+            "height": int(stream.height or 0),
+            "frames": frame_count,
+            "can_decode": can_decode,
+            "backend": "PyAV",
+        }
+        container.close()
+        return info
+    except ImportError:
+        pass
+
+    try:
+        import cv2
+    except ImportError as e:
+        raise RuntimeError("PyAV (av) or OpenCV (cv2) not installed -- skipping video decode checks") from e
+
+    cap = cv2.VideoCapture(str(path))
+    if not cap.isOpened():
+        raise RuntimeError("could not open video")
+    try:
+        ok, _ = cap.read()
+        return {
+            "fps": float(cap.get(cv2.CAP_PROP_FPS) or 0) or None,
+            "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0),
+            "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0),
+            "frames": int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0),
+            "can_decode": bool(ok),
+            "backend": "OpenCV",
+        }
+    finally:
+        cap.release()
+
+
 def check_videos(dataset: LoadedDataset) -> CheckResult:
     result = CheckResult(name="Video Integrity", severity=Severity.PASS)
 
@@ -56,9 +113,11 @@ def _check_video_feature(
     fps = dataset.info.fps if dataset.info else None
     expected_shape = feat_spec.get("shape")  # e.g. [3, 480, 640] or [480, 640, 3]
 
-    # Check video files exist for each episode
+    # v2 typically has one video file per episode; v3 can store many episodes
+    # in the same chunk/file video. Group by resolved path so frame-count checks
+    # compare a physical video file with all episodes it contains.
+    video_groups: dict[Path, dict] = {}
     missing_videos = []
-    checked = 0
     decode_errors = []
     fps_mismatches = []
     resolution_mismatches = []
@@ -72,7 +131,9 @@ def _check_video_feature(
         vid_chunk_key = f"videos/{feat_name}/chunk_index"
         vid_file_key = f"videos/{feat_name}/file_index"
         chunk_idx = ep_meta.raw.get(vid_chunk_key, ep_idx // chunks_size)
-        file_idx = ep_meta.raw.get(vid_file_key, ep_idx)
+        # v3 maps episodes to chunk video files via file_index; v2 usually maps
+        # to per-episode videos and may not have file_index metadata.
+        file_idx = ep_meta.raw.get(vid_file_key, ep_meta.raw.get("episode_index", ep_idx))
 
         # Build video path from template -- handle different template variable names
         try:
@@ -94,27 +155,36 @@ def _check_video_feature(
             missing_videos.append(ep_idx)
             continue
 
-        checked += 1
+        group = video_groups.setdefault(full_path, {"episodes": [], "expected_frames": 0})
+        group["episodes"].append(ep_idx)
+        if ep_meta.length:
+            group["expected_frames"] += int(ep_meta.length)
+        elif fps:
+            from_ts = ep_meta.raw.get(f"videos/{feat_name}/from_timestamp")
+            to_ts = ep_meta.raw.get(f"videos/{feat_name}/to_timestamp")
+            if from_ts is not None and to_ts is not None:
+                group["expected_frames"] += round((to_ts - from_ts) * fps)
 
-        # Only do detailed checks on a sample to avoid being too slow
-        if checked > 20:
-            continue
+    checked = 0
+    for full_path, group in sorted(video_groups.items(), key=lambda item: str(item[0])):
+        checked += 1
+        episodes = group["episodes"]
+        first_ep = episodes[0] if episodes else "?"
 
         try:
-            import av
-            container = av.open(str(full_path))
-            stream = container.streams.video[0]
+            expected_frames = group["expected_frames"]
+            probe = _probe_video(full_path, count_frames_if_needed=checked <= 20)
 
             # Check fps
-            if fps and stream.average_rate:
-                video_fps = float(stream.average_rate)
+            if fps and probe["fps"]:
+                video_fps = probe["fps"]
                 if abs(video_fps - fps) > 1.0:
-                    fps_mismatches.append((ep_idx, video_fps))
+                    fps_mismatches.append((str(full_path.relative_to(root)), video_fps))
 
             # Check resolution
-            if expected_shape and stream.width and stream.height:
+            if expected_shape and probe["width"] and probe["height"]:
                 # Shape could be [C, H, W] or [H, W, C]
-                h, w = stream.height, stream.width
+                h, w = probe["height"], probe["width"]
                 shape_matches = False
                 for perm in [expected_shape, list(reversed(expected_shape))]:
                     if len(perm) >= 2:
@@ -122,36 +192,32 @@ def _check_video_feature(
                             shape_matches = True
                             break
                 if not shape_matches:
-                    resolution_mismatches.append((ep_idx, h, w, expected_shape))
+                    resolution_mismatches.append((str(full_path.relative_to(root)), h, w, expected_shape))
 
-            # Check frame count vs episode metadata
-            if fps:
-                from_ts = ep_meta.raw.get(f"videos/{feat_name}/from_timestamp")
-                to_ts = ep_meta.raw.get(f"videos/{feat_name}/to_timestamp")
-                if from_ts is not None and to_ts is not None:
-                    expected_frames = round((to_ts - from_ts) * fps)
-                    # Count actual frames
-                    actual_frames = stream.frames
-                    if actual_frames == 0:
-                        # Some containers don't report frame count, decode to count
-                        container.seek(0)
-                        actual_frames = sum(1 for _ in container.decode(video=0))
-                    if actual_frames > 0 and abs(actual_frames - expected_frames) > 2:
-                        frame_count_mismatches.append((ep_idx, actual_frames, expected_frames))
+            # Check frame count vs aggregate episode metadata for this physical file.
+            actual_frames = probe["frames"]
+            if expected_frames and actual_frames > 0 and abs(actual_frames - expected_frames) > 2:
+                frame_count_mismatches.append((
+                    str(full_path.relative_to(root)),
+                    actual_frames,
+                    expected_frames,
+                    len(episodes),
+                ))
 
-            # Try decoding first frame to check for corruption
-            container.seek(0)
-            for frame in container.decode(video=0):
-                break  # just need first frame
-            else:
-                decode_errors.append(ep_idx)
-
-            container.close()
-        except ImportError:
-            result.warn("PyAV (av) not installed -- skipping video decode checks")
-            return
+            # Try decoding first frame to check for corruption.
+            if not probe["can_decode"]:
+                decode_errors.append(first_ep)
+        except RuntimeError as e:
+            if "not installed" in str(e):
+                result.warn(str(e))
+                return
+            decode_errors.append(first_ep)
         except Exception as e:
-            decode_errors.append(ep_idx)
+            decode_errors.append(first_ep)
+
+        # Only do detailed decode checks on a sample to avoid being too slow.
+        if checked >= 20:
+            break
 
     if missing_videos:
         if len(missing_videos) > 10:
@@ -168,13 +234,16 @@ def _check_video_feature(
         result.fail(f"{feat_name}: {len(decode_errors)} video(s) failed to decode: episodes {decode_errors[:5]}")
 
     if fps_mismatches:
-        for ep_idx, vfps in fps_mismatches[:3]:
-            result.warn(f"{feat_name}: Episode {ep_idx} video fps={vfps:.1f} != dataset fps={fps}")
+        for relpath, vfps in fps_mismatches[:3]:
+            result.warn(f"{feat_name}: {relpath} video fps={vfps:.1f} != dataset fps={fps}")
 
     if resolution_mismatches:
-        for ep_idx, h, w, expected in resolution_mismatches[:3]:
-            result.warn(f"{feat_name}: Episode {ep_idx} resolution {w}x{h} doesn't match shape {expected}")
+        for relpath, h, w, expected in resolution_mismatches[:3]:
+            result.warn(f"{feat_name}: {relpath} resolution {w}x{h} doesn't match shape {expected}")
 
     if frame_count_mismatches:
-        for ep_idx, actual, expected in frame_count_mismatches[:3]:
-            result.warn(f"{feat_name}: Episode {ep_idx} has {actual} frames, expected {expected}")
+        for relpath, actual, expected, n_eps in frame_count_mismatches[:3]:
+            result.warn(
+                f"{feat_name}: {relpath} has {actual} frames, expected {expected} "
+                f"from {n_eps} episode(s)"
+            )

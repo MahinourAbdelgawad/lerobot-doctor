@@ -86,3 +86,23 @@ def test_cli_ci_fail_on_fail(tmp_dataset, capsys):
     captured = capsys.readouterr()
     data = json.loads(captured.out)
     assert "overall_severity" in data
+
+
+def test_cli_gate_on_zip(tmp_path, capsys):
+    import zipfile
+
+    from tests.conftest import create_consolidated_v3_dataset
+
+    root = create_consolidated_v3_dataset(
+        tmp_path / "dataset", n_episodes=12, n_frames_per_ep=100, fps=10,
+    )
+    zip_path = tmp_path / "dataset.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        for path in root.rglob("*"):
+            if path.is_file():
+                zf.write(path, path.relative_to(root.parent))
+
+    main(["gate", str(zip_path), "--policy", "act"])
+    captured = capsys.readouterr()
+    assert "Training Gate [PASS]" in captured.out
+    assert "No info.json" not in captured.out

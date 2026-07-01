@@ -39,6 +39,8 @@ def print_report(report: DiagnosticReport, verbose: bool = False):
     header.append(f"Dataset: {report.dataset_path}")
     if report.codebase_version:
         header.append(f" ({report.codebase_version})")
+    elif report.format_version:
+        header.append(f" ({report.format_version})")
     header.append("\n")
     parts = []
     if report.total_episodes is not None:
@@ -94,7 +96,8 @@ def print_report(report: DiagnosticReport, verbose: bool = False):
 def _print_plain(report: DiagnosticReport, verbose: bool = False):
     """Fallback plain text output without rich."""
     print(f"lerobot-doctor v{__version__} -- Dataset Quality Report")
-    print(f"Dataset: {report.dataset_path}")
+    version_suffix = report.codebase_version or report.format_version
+    print(f"Dataset: {report.dataset_path}{f' ({version_suffix})' if version_suffix else ''}")
     parts = []
     if report.total_episodes is not None:
         parts.append(f"Episodes: {report.total_episodes}")
@@ -218,6 +221,8 @@ def report_to_markdown(report: DiagnosticReport) -> str:
     lines.append(f"- **Dataset:** `{report.dataset_path}`")
     if report.codebase_version:
         lines.append(f"- **Codebase:** {report.codebase_version}")
+    if report.format_version:
+        lines.append(f"- **Format:** {report.format_version}")
     if report.total_episodes is not None:
         lines.append(f"- **Episodes:** {report.total_episodes}")
     if report.total_frames is not None:
@@ -265,6 +270,7 @@ def report_to_json(report: DiagnosticReport) -> str:
         "dataset_path": report.dataset_path,
         "dataset_name": report.dataset_name,
         "codebase_version": report.codebase_version,
+        "format_version": report.format_version,
         "total_episodes": report.total_episodes,
         "total_frames": report.total_frames,
         "fps": report.fps,

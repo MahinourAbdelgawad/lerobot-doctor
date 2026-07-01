@@ -1,6 +1,6 @@
 # lerobot-doctor
 
-Dataset quality diagnostics for [LeRobot](https://github.com/huggingface/lerobot) v3 datasets.
+Dataset quality diagnostics for [LeRobot](https://github.com/huggingface/lerobot) v2/v3 datasets.
 
 Catches issues that waste debugging time: corrupted timestamps, dropped frames, frozen actions, clipped values, metadata inconsistencies, video problems, stuck actuators, and more.
 
@@ -25,8 +25,11 @@ pip install .
 ## Usage
 
 ```bash
-# Check a local dataset
+# Check a local dataset directory
 lerobot-doctor /path/to/dataset
+
+# Check a local dataset .zip archive (format version is auto-detected)
+lerobot-doctor /path/to/dataset.zip
 
 # Check a HuggingFace dataset
 lerobot-doctor lerobot/pusht

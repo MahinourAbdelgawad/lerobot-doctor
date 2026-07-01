@@ -1,10 +1,13 @@
-"""Load LeRobot v3 datasets from local paths or HuggingFace Hub."""
+"""Load LeRobot v2/v3 datasets from local paths, archives, or HuggingFace Hub."""
 
 from __future__ import annotations
 
 import json
+import tempfile
+import zipfile
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
+from typing import Any
 
 import numpy as np
 import pyarrow.parquet as pq
@@ -16,6 +19,7 @@ class DatasetInfo:
     raw: dict
     root: Path
     codebase_version: str | None = None
+    format_version: str | None = None  # "v2", "v3", or None when unknown
     fps: int | None = None
     total_episodes: int | None = None
     total_frames: int | None = None
@@ -48,6 +52,7 @@ class EpisodeMeta:
 class LoadedDataset:
     """Everything needed for running checks."""
     root: Path
+    display_path: str | None = None
     info: DatasetInfo | None = None
     info_error: str | None = None
     episodes_meta: list[EpisodeMeta] = field(default_factory=list)
@@ -55,6 +60,32 @@ class LoadedDataset:
     tasks: list[dict] | None = None
     is_local: bool = True
     max_episodes_applied: int | None = None  # set when user passed --max-episodes
+    archive_path: Path | None = None
+    archive_inner_root: str | None = None
+    _temp_dir: Any | None = field(default=None, repr=False, compare=False)
+
+
+def detect_format_version(root: Path, raw_info: dict | None = None) -> str | None:
+    """Detect LeRobot dataset major format version from info.json or layout."""
+    codebase_version = (raw_info or {}).get("codebase_version")
+    if isinstance(codebase_version, str):
+        if codebase_version.startswith("v3"):
+            return "v3"
+        if codebase_version.startswith("v2"):
+            return "v2"
+
+    # Layout fallback:
+    # - v3 stores episode metadata as parquet shards under meta/episodes/.
+    # - v2.1 stores per-episode parquet files and meta/episodes.jsonl.
+    if (root / "meta" / "episodes").is_dir():
+        return "v3"
+    if (root / "meta" / "episodes.jsonl").exists():
+        return "v2"
+    if list((root / "data").rglob("file-*.parquet")):
+        return "v3"
+    if list((root / "data").rglob("episode_*.parquet")):
+        return "v2"
+    return None
 
 
 def load_info(root: Path) -> DatasetInfo | str:
@@ -71,6 +102,7 @@ def load_info(root: Path) -> DatasetInfo | str:
         raw=raw,
         root=root,
         codebase_version=raw.get("codebase_version"),
+        format_version=detect_format_version(root, raw),
         fps=raw.get("fps"),
         total_episodes=raw.get("total_episodes"),
         total_frames=raw.get("total_frames"),
@@ -84,12 +116,26 @@ def load_info(root: Path) -> DatasetInfo | str:
     )
 
 
+def _load_jsonl(path: Path) -> list[dict]:
+    """Load a JSON Lines file."""
+    rows: list[dict] = []
+    for line_no, line in enumerate(path.read_text().splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"{path} line {line_no} is not valid JSON: {e}") from e
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
 def load_episodes_meta(root: Path, info: DatasetInfo) -> list[EpisodeMeta]:
-    """Load episode metadata from meta/episodes/ parquet files."""
+    """Load episode metadata for both v3 parquet and v2 JSONL layouts."""
     episodes_dir = root / "meta" / "episodes"
-    if not episodes_dir.exists():
-        return []
-    parquet_files = sorted(episodes_dir.rglob("*.parquet"))
+    parquet_files = sorted(episodes_dir.rglob("*.parquet")) if episodes_dir.exists() else []
     metas = []
     for pf in parquet_files:
         table = pq.read_table(pf)
@@ -101,6 +147,21 @@ def load_episodes_meta(root: Path, info: DatasetInfo) -> list[EpisodeMeta]:
                 raw=row,
             ))
     metas.sort(key=lambda m: m.episode_index)
+    if metas:
+        return metas
+
+    episodes_jsonl = root / "meta" / "episodes.jsonl"
+    if episodes_jsonl.exists():
+        rows = _load_jsonl(episodes_jsonl)
+        for fallback_idx, row in enumerate(rows):
+            ep_idx = row.get("episode_index", fallback_idx)
+            length = row.get("length", row.get("num_frames", 0))
+            metas.append(EpisodeMeta(
+                episode_index=int(ep_idx) if ep_idx is not None else fallback_idx,
+                length=int(length) if length is not None else 0,
+                raw=row,
+            ))
+        metas.sort(key=lambda m: m.episode_index)
     return metas
 
 
@@ -198,15 +259,32 @@ def load_episode_data(root: Path, info: DatasetInfo, max_episodes: int | None = 
 
 
 def load_tasks(root: Path) -> list[dict] | None:
-    """Load tasks.parquet if it exists."""
+    """Load task metadata from v3 parquet or v2 JSON/JSONL files."""
     tasks_path = root / "meta" / "tasks.parquet"
-    if not tasks_path.exists():
-        return None
-    table = pq.read_table(tasks_path)
-    return [
-        {col: table.column(col)[i].as_py() for col in table.column_names}
-        for i in range(len(table))
-    ]
+    if tasks_path.exists():
+        table = pq.read_table(tasks_path)
+        return [
+            {col: table.column(col)[i].as_py() for col in table.column_names}
+            for i in range(len(table))
+        ]
+
+    tasks_jsonl = root / "meta" / "tasks.jsonl"
+    if tasks_jsonl.exists():
+        return _load_jsonl(tasks_jsonl)
+
+    tasks_json = root / "meta" / "tasks.json"
+    if tasks_json.exists():
+        raw = json.loads(tasks_json.read_text())
+        if isinstance(raw, list):
+            return [r for r in raw if isinstance(r, dict)]
+        if isinstance(raw, dict):
+            if all(isinstance(v, str) for v in raw.values()):
+                return [
+                    {"task_index": int(k) if str(k).isdigit() else k, "task": v}
+                    for k, v in raw.items()
+                ]
+            return [raw]
+    return None
 
 
 def load_from_hf(repo_id: str, cache_dir: Path | None = None, max_episodes: int | None = None) -> LoadedDataset:
@@ -228,6 +306,7 @@ def load_from_hf(repo_id: str, cache_dir: Path | None = None, max_episodes: int 
         )
         ds = load_local(Path(local_dir), max_episodes=None)
         ds.is_local = False
+        ds.display_path = repo_id
         return ds
 
     # List repo files once so we know what meta/episodes parquets exist.
@@ -272,6 +351,7 @@ def load_from_hf(repo_id: str, cache_dir: Path | None = None, max_episodes: int 
         )
         ds = load_local(Path(local_dir), max_episodes=max_episodes)
         ds.is_local = False
+        ds.display_path = repo_id
         return ds
 
     # Phase 2: download episodes meta files incrementally until we've covered
@@ -323,12 +403,13 @@ def load_from_hf(repo_id: str, cache_dir: Path | None = None, max_episodes: int 
 
     ds = load_local(root, max_episodes=max_episodes)
     ds.is_local = False
+    ds.display_path = repo_id
     return ds
 
 
 def load_local(root: Path, max_episodes: int | None = None) -> LoadedDataset:
     """Load a local dataset."""
-    ds = LoadedDataset(root=root, is_local=True)
+    ds = LoadedDataset(root=root, display_path=str(root), is_local=True)
 
     info_result = load_info(root)
     if isinstance(info_result, str):
@@ -343,10 +424,89 @@ def load_local(root: Path, max_episodes: int | None = None) -> LoadedDataset:
     return ds
 
 
+def _find_zip_dataset_root(zip_file: zipfile.ZipFile) -> tuple[str, str | None]:
+    """Return (info_json_member_name, dataset_root_prefix) for a dataset zip."""
+    candidates: list[tuple[str, str | None]] = []
+    for name in zip_file.namelist():
+        path = PurePosixPath(name)
+        if path.name != "info.json":
+            continue
+        parts = path.parts
+        if len(parts) >= 2 and parts[-2] == "meta":
+            root_parts = parts[:-2]
+            root = "/".join(root_parts) if root_parts else None
+            candidates.append((name, root))
+
+    if not candidates:
+        raise ValueError("Archive does not contain meta/info.json")
+
+    # Prefer the shallowest dataset root if more than one is present.
+    candidates.sort(key=lambda item: 0 if item[1] is None else len(PurePosixPath(item[1]).parts))
+    return candidates[0]
+
+
+def _safe_extract_zip_dataset(zip_path: Path, dest: Path) -> tuple[Path, str | None]:
+    """Extract a dataset zip under dest/dataset and return the extracted root."""
+    with zipfile.ZipFile(zip_path) as zf:
+        _, root_prefix = _find_zip_dataset_root(zf)
+        root_parts = PurePosixPath(root_prefix).parts if root_prefix else ()
+        out_root = dest / "dataset"
+        out_root.mkdir(parents=True, exist_ok=True)
+        out_root_resolved = out_root.resolve()
+
+        for member in zf.infolist():
+            if member.is_dir():
+                continue
+            member_path = PurePosixPath(member.filename)
+            parts = member_path.parts
+            if member_path.is_absolute() or ".." in parts:
+                raise ValueError(f"Unsafe path in archive: {member.filename}")
+            if root_parts:
+                if parts[: len(root_parts)] != root_parts:
+                    continue
+                rel_parts = parts[len(root_parts):]
+            else:
+                rel_parts = parts
+            if not rel_parts:
+                continue
+
+            target = out_root.joinpath(*rel_parts)
+            if out_root_resolved not in target.parent.resolve().parents and target.parent.resolve() != out_root_resolved:
+                raise ValueError(f"Unsafe path in archive: {member.filename}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(member) as src, target.open("wb") as dst:
+                dst.write(src.read())
+
+        return out_root, root_prefix
+
+
+def load_archive(path: Path, max_episodes: int | None = None) -> LoadedDataset:
+    """Load a dataset from a local .zip archive."""
+    if path.suffix.lower() != ".zip":
+        raise ValueError(f"Unsupported archive format: {path.suffix or path.name}")
+
+    tmp = tempfile.TemporaryDirectory(prefix="lerobot-doctor-")
+    try:
+        root, inner_root = _safe_extract_zip_dataset(path, Path(tmp.name))
+        ds = load_local(root, max_episodes=max_episodes)
+        ds.display_path = str(path)
+        ds.archive_path = path
+        ds.archive_inner_root = inner_root
+        ds._temp_dir = tmp  # keep extracted files alive while checks run
+        return ds
+    except Exception:
+        tmp.cleanup()
+        raise
+
+
 def load_dataset(path_or_repo: str, max_episodes: int | None = None) -> LoadedDataset:
-    """Load dataset from local path or HF repo_id."""
+    """Load dataset from local directory, local archive, or HF repo_id."""
     local = Path(path_or_repo)
     if local.exists() and local.is_dir():
         return load_local(local, max_episodes=max_episodes)
+    if local.exists() and local.is_file():
+        return load_archive(local, max_episodes=max_episodes)
+    if local.is_absolute():
+        raise FileNotFoundError(f"Local path does not exist: {local}")
     # Treat as HF repo_id
     return load_from_hf(path_or_repo, max_episodes=max_episodes)

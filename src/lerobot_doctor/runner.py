@@ -71,6 +71,7 @@ class DiagnosticReport:
     dataset_path: str
     dataset_name: str | None = None
     codebase_version: str | None = None
+    format_version: str | None = None
     total_episodes: int | None = None
     total_frames: int | None = None
     fps: int | None = None
@@ -98,10 +99,11 @@ def run_checks(
     verbose: bool = False,
 ) -> DiagnosticReport:
     """Run selected checks on a loaded dataset."""
-    report = DiagnosticReport(dataset_path=str(dataset.root))
+    report = DiagnosticReport(dataset_path=dataset.display_path or str(dataset.root))
 
     if dataset.info is not None:
         report.codebase_version = dataset.info.codebase_version
+        report.format_version = dataset.info.format_version
         report.total_episodes = dataset.info.total_episodes
         report.total_frames = dataset.info.total_frames
         report.fps = dataset.info.fps

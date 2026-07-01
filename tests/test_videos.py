@@ -53,3 +53,18 @@ def test_no_info(tmp_path):
     ds = load_local(root)
     result = check_videos(ds)
     assert result.severity == Severity.FAIL
+
+
+def test_consolidated_v3_video_shard_passes(tmp_path):
+    """Many episodes in one MP4 shard must not trigger per-episode frame-count WARN."""
+    from tests.conftest import create_consolidated_v3_dataset
+
+    root = create_consolidated_v3_dataset(tmp_path / "dataset", n_episodes=4, n_frames_per_ep=8, fps=10)
+    ds = load_local(root)
+    result = check_videos(ds)
+    assert result.severity == Severity.PASS
+    mismatch_msgs = [
+        m.message for m in result.messages
+        if m.severity == Severity.WARN and "frames, expected" in m.message
+    ]
+    assert mismatch_msgs == []
