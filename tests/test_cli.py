@@ -48,10 +48,11 @@ def test_cli_nonexistent_path(capsys):
 
 
 def test_cli_version(capsys):
+    from lerobot_doctor import __version__
     with pytest.raises(SystemExit) as exc_info:
         main(["--version"])
     captured = capsys.readouterr()
-    assert "0.1.0" in captured.out
+    assert __version__ in captured.out
 
 
 def test_cli_ci_mode(tmp_dataset, capsys):
