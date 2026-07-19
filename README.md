@@ -200,6 +200,23 @@ lerobot-doctor merge-check ./dataset1 ./dataset2         # pre-merge compatibili
 lerobot-doctor merge-check ./merged_dataset --post-merge # post-merge validation
 ```
 
+## Streamlit UI
+
+Run the interactive app locally:
+
+```bash
+cd /path/to/lerobot-doctor
+streamlit run streamlit_app.py
+```
+
+Or after installing the package in editable mode:
+
+```bash
+lerobot-doctor-ui
+```
+
+The UI accepts either a local dataset path or a Hugging Face repo id and shows the same diagnostic results that the CLI produces.
+
 ## Development
 
 ```bash
